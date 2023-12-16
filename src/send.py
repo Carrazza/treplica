@@ -6,7 +6,7 @@ def send_multicast_message(message, multicast_group, multicast_port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
-    ttl = 2
+    ttl = 10
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
 
 
