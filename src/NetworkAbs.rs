@@ -2,6 +2,7 @@ use std::mem::MaybeUninit;
 use std::net::{SocketAddr, IpAddr,Ipv4Addr};
 use std::str::FromStr;
 use socket2::*;
+use tokio::task::JoinHandle;
 use std::io::{self, ErrorKind};
 use tokio::net::UdpSocket;
 use tokio::time::{self, Duration};
@@ -9,9 +10,11 @@ use std::net::*;
 use tokio::*;
 use local_ip_address::list_afinet_netifas;
 use socket2::{Domain, Socket, Type};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 
+
+#[derive(Clone)]
 pub struct NetworkLayer {
 
     mult_group: Ipv4Addr,
@@ -23,9 +26,15 @@ pub struct NetworkLayer {
     local_port: u16,
     local_address: SocketAddr,
 
-    sender : tokio::sync::mpsc::Sender<String>,
-    receiver : tokio::sync::mpsc::Receiver<String>
+}
 
+
+pub struct Orquestrator {
+
+    pub recebe_mult_handle: JoinHandle<()>,
+    pub recebe_uni_handle: JoinHandle<()>,
+    pub receiver_uni: Receiver<String>,
+    pub receiver_mult: Receiver<String>
 
 }
 
@@ -35,22 +44,71 @@ fn address( ip : &str , port: u16) -> String
     return format!("{}:{}", ip, port); 
 }
 
+
+// Retorna valor ipv4
 fn ip_from_str(ip: &str) -> Ipv4Addr {
 
     return Ipv4Addr::from_str(ip).unwrap()
 
 }
 
-async fn recebe_multicast(mult_address : SocketAddr, mult_group: Ipv4Addr)
+
+
+
+
+
+
+pub async fn recebe_unicast(net_layer : NetworkLayer , sender : Sender<String>)
+{
+    //let local_sock: SocketAddr = "127.0.0.1:30000".parse().unwrap();
+
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
+    socket.set_reuse_address(true).unwrap();
+    socket.bind(&net_layer.local_address.into()).unwrap();
+
+
+    loop {
+        let mut buf: [MaybeUninit<u8>; 1024] = unsafe { MaybeUninit::uninit().assume_init() };
+
+    
+
+        match socket.recv_from(&mut buf) {
+            Ok((size, src)) => {
+                
+                let u8_buf: &mut [u8];
+
+                unsafe {
+                    u8_buf = &mut *(buf.as_mut_ptr() as *mut [u8; 1024]);
+                    
+                }
+
+                let message = String::from_utf8_lossy(&u8_buf[..size]);
+                //println!("Received message from {:?}: {}", src, message);
+
+                sender.send(message.to_string()).await.unwrap();
+            
+            }
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => eprintln!("Error receiving message: {}", e),
+        }
+
+
+    }
+
+
+}
+    
+
+pub async fn recebe_multicast(net_layer : NetworkLayer )
 {
 //let teste: SocketAddr = "239.0.0.125:12345".parse().unwrap();
 
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
     socket.set_reuse_address(true).unwrap();
-    socket.bind(&mult_address.into()).unwrap();
+    socket.bind(&net_layer.mult_address.into()).unwrap();
 
-    socket.join_multicast_v4(&mult_group,&Ipv4Addr::UNSPECIFIED).unwrap();
+    socket.join_multicast_v4(&net_layer.mult_group,&Ipv4Addr::UNSPECIFIED).unwrap();
 
     loop {
         let mut buf: [MaybeUninit<u8>; 1024] = unsafe { MaybeUninit::uninit().assume_init() };
@@ -83,14 +141,11 @@ async fn recebe_multicast(mult_address : SocketAddr, mult_group: Ipv4Addr)
 
 
 
-
-
 impl NetworkLayer {
 
-    pub async fn config (mult_group: &str , mult_port : u16, local_ip : &str , local_port:u16) -> Self
+    pub async fn config (mult_group: &str , mult_port : u16, local_ip : &str , local_port:u16) -> NetworkLayer
     {
 
-        let (sender, mut receiver) = mpsc::channel::<String>(32);
 
 
         return NetworkLayer {
@@ -102,77 +157,54 @@ impl NetworkLayer {
             local_ip : ip_from_str(local_ip),
             local_port : local_port,
             local_address : address(local_ip, local_port).parse().unwrap(),
-            receiver : receiver ,
-            sender : sender
+
             
 
-        }
-       
     }
-    pub async fn recebe_unicast(local_address : SocketAddr )
-    {
-        //let local_sock: SocketAddr = "127.0.0.1:30000".parse().unwrap();
-    
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
-        socket.set_reuse_address(true).unwrap();
-        socket.bind(&local_address.into()).unwrap();
-    
-    
-        loop {
-            let mut buf: [MaybeUninit<u8>; 1024] = unsafe { MaybeUninit::uninit().assume_init() };
-    
-        
-    
-            match socket.recv_from(&mut buf) {
-                Ok((size, src)) => {
-                    
-                    let u8_buf: &mut [u8];
-    
-                    unsafe {
-                        u8_buf = &mut *(buf.as_mut_ptr() as *mut [u8; 1024]);
-                        
-                    }
-    
-                    let message = String::from_utf8_lossy(&u8_buf[..size]);
-                    println!("Received message from {:?}: {}", src, message);
-                    
-               
-                }
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(e) => eprintln!("Error receiving message: {}", e),
-            }
-    
-    
-        }
-    
-    
+   
     }
-  
-    pub async fn run(&self)
-    {
-        let recebe_multicast_handle = tokio::spawn(recebe_multicast(self.mult_address , self.mult_group));
-        let recebe_unicast_handle = tokio::spawn(NetworkLayer::recebe_unicast(self.local_address));
 
-    
+
+    pub async fn run(&self) -> Orquestrator
+    {
+        let (sender_uni,  receiver_uni): (Sender<String>, Receiver<String>) = channel::<String>(10);
+        let (sender_mult,  receiver_mult): (Sender<String>, Receiver<String>) = channel::<String>(10);
+
+        let recebe_multicast_handle = tokio::spawn(recebe_multicast(self.clone()));
+        
+        let recebe_unicast_handle = tokio::spawn(recebe_unicast(self.clone() , sender_uni));
+        
+
+        
+        Orquestrator{
+            recebe_mult_handle : recebe_multicast_handle,
+            recebe_uni_handle : recebe_unicast_handle ,
+            receiver_uni : receiver_uni,
+            receiver_mult : receiver_mult
+        }
+
+        
+        
     }
 
 
     pub async fn send(&self,msg : &str , ip : &str , port: u16 )
     {   
-        //Converte antes do envio
-        let msg_bytes = msg.as_bytes();
+      
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
+        socket.join_multicast_v4(&self.mult_group,&Ipv4Addr::UNSPECIFIED).unwrap();
 
-        let bind_ip = address(self.local_ip.to_string().as_str(), 0);
-
-
-        //TODO: Atualmente manda do localhost, ver como mudaremos isso
-        let socket = UdpSocket::bind(bind_ip).await.expect("couldn't bind to address");    
         
+        let dst = SocketAddrV4::new(ip_from_str(ip),port);
 
-        println!("to: {}:{} -> {} {:?} ",ip,port,msg,msg_bytes);
-        
-        //TODO: Aprender a checar por erros e coisas assim
-        socket.send_to(msg_bytes, address(ip, port)).await.unwrap();
+        println!("Sending {:?} -> {}", dst, msg);
+
+        socket.send_to(msg.as_bytes(), &dst.into()).unwrap();
+
     }
+
+  
 }
+
+
 
