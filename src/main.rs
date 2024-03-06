@@ -1,7 +1,6 @@
 use tokio::*;
 use tokio::time::{sleep, Duration};
-
-
+use std::env;
 
 mod NetworkAbs;
 use NetworkAbs::{NetworkLayer, Orquestrator};
@@ -10,24 +9,55 @@ use NetworkAbs::{NetworkLayer, Orquestrator};
 async fn main() {
 
 
-    let network = NetworkLayer::config("239.0.0.125",12345,"127.0.0.1",15001).await;
+    let args: Vec<String> = env::args().collect();
+
+    let port = &args[1].parse::<u16>().unwrap();
+
+ 
+
+
+
+    let network = NetworkLayer::config("239.0.0.125",12345,"127.0.0.1",*port).await;
 
     let mut orq = network.run().await;
 
-    tokio::spawn(async move {
-        while let Some(message) = orq.receiver_uni.recv().await {
-            println!("Received: {}", message);
-        }
-    });
-
-
     loop {
         
-        network.send("Uni port","127.0.0.1",15000).await;
-        //network.send("multicast Port","239.0.0.125",12345).await;
-        sleep(Duration::from_secs(5)).await;
+        if args.len() > 2 {
 
-      
+            let dst = &args[2].parse::<u16>().unwrap();
+
+            network.send("Uni port","127.0.0.1",*dst).await;
+   
+        
+            network.send("multicast Port","239.0.0.125",12345).await;
+
+            sleep(Duration::from_secs(3)).await;
+
+        }
+
+    
+
+        //match orq.receiver_uni.try_recv() {
+        //    Ok(received_message) => {
+        //        println!("Uni Msg: {}", received_message);
+        //    }
+        //    Err(error) => {
+        //        //println!("Erro Uni msg: {}", error);
+        //    }
+        //}
+    
+        match orq.receiver.recv() {
+            Ok(received_message) => {
+                println!("Mult Msg: {}", received_message);
+            }
+            Err(error) => {
+                //println!("Erro Mult msg: {}", error);
+            }
+        }
+
+
+        //sleep(Duration::from_secs(3)).await;
 
     }
 

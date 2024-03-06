@@ -10,7 +10,8 @@ use std::net::*;
 use tokio::*;
 use local_ip_address::list_afinet_netifas;
 use socket2::{Domain, Socket, Type};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc;
+
 
 
 
@@ -33,8 +34,7 @@ pub struct Orquestrator {
 
     pub recebe_mult_handle: JoinHandle<()>,
     pub recebe_uni_handle: JoinHandle<()>,
-    pub receiver_uni: Receiver<String>,
-    pub receiver_mult: Receiver<String>
+    pub receiver: mpsc::Receiver<String>
 
 }
 
@@ -58,7 +58,7 @@ fn ip_from_str(ip: &str) -> Ipv4Addr {
 
 
 
-pub async fn recebe_unicast(net_layer : NetworkLayer , sender : Sender<String>)
+pub async fn recebe_unicast(net_layer : NetworkLayer , sender : mpsc::Sender<String>)
 {
     //let local_sock: SocketAddr = "127.0.0.1:30000".parse().unwrap();
 
@@ -85,7 +85,7 @@ pub async fn recebe_unicast(net_layer : NetworkLayer , sender : Sender<String>)
                 let message = String::from_utf8_lossy(&u8_buf[..size]);
                 //println!("Received message from {:?}: {}", src, message);
 
-                sender.send(message.to_string()).await.unwrap();
+                sender.send(message.to_string()).unwrap();
             
             }
             Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
@@ -99,7 +99,7 @@ pub async fn recebe_unicast(net_layer : NetworkLayer , sender : Sender<String>)
 }
     
 
-pub async fn recebe_multicast(net_layer : NetworkLayer )
+pub async fn recebe_multicast(net_layer : NetworkLayer ,  sender : mpsc::Sender<String>)
 {
 //let teste: SocketAddr = "239.0.0.125:12345".parse().unwrap();
 
@@ -126,7 +126,8 @@ pub async fn recebe_multicast(net_layer : NetworkLayer )
                 }
 
                 let message = String::from_utf8_lossy(&u8_buf[..size]);
-                println!("Received message from {:?}: {}", src, message);
+                //println!("Received message from {:?}: {}", src, message);
+                sender.send(message.to_string()).unwrap();
             }
             Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
             Err(e) => eprintln!("Error receiving message: {}", e),
@@ -165,22 +166,22 @@ impl NetworkLayer {
     }
 
 
+
     pub async fn run(&self) -> Orquestrator
     {
-        let (sender_uni,  receiver_uni): (Sender<String>, Receiver<String>) = channel::<String>(10);
-        let (sender_mult,  receiver_mult): (Sender<String>, Receiver<String>) = channel::<String>(10);
+    
+        let (sender,  receiver): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel::<String>();
 
-        let recebe_multicast_handle = tokio::spawn(recebe_multicast(self.clone()));
+        let recebe_multicast_handle = tokio::spawn(recebe_multicast(self.clone(),sender.clone()));
         
-        let recebe_unicast_handle = tokio::spawn(recebe_unicast(self.clone() , sender_uni));
+        let recebe_unicast_handle = tokio::spawn(recebe_unicast(self.clone() , sender.clone()));
         
 
         
         Orquestrator{
             recebe_mult_handle : recebe_multicast_handle,
             recebe_uni_handle : recebe_unicast_handle ,
-            receiver_uni : receiver_uni,
-            receiver_mult : receiver_mult
+            receiver : receiver
         }
 
         
